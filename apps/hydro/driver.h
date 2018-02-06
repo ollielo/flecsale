@@ -24,6 +24,9 @@
 #include <sstream>
 #include <utility>
 
+// Caliper include
+#include <caliper/cali.h>
+
 namespace apps {
 namespace hydro {
   
@@ -109,15 +112,26 @@ flecsi_register_field(
 ///////////////////////////////////////////////////////////////////////////////
 int driver(int argc, char** argv) 
 {
+  // [Caliper] Mark this function
+  CALI_CXX_MARK_FUNCTION;
+  
+  // [Caliper] getting the context begin
+  CALI_MARK_BEGIN("getting the context");
 
   // get the context
   auto & context = flecsi::execution::context_t::instance();
   auto rank = context.color();
+  
+  // [Caliper] getting the context end
+  CALI_MARK_END("getting the context");
 
   //===========================================================================
   // Parse arguments
   //===========================================================================
   
+  // [Caliper] parsing arguments begin
+  CALI_MARK_BEGIN("parsing arguments");
+
   auto args = process_arguments( argc, argv );
   // Assume arguments are sanitized
   
@@ -130,19 +144,31 @@ int driver(int argc, char** argv)
 
   // figure out an output prefix, this will be used later
   auto prefix = utils::remove_extension( mesh_basename );
+  
+  // [Caliper] parsing arguments end
+  CALI_MARK_END("parsing arguments");
 
   //===========================================================================
   // Mesh Setup
   //===========================================================================
+  
+  // [Caliper] getting the mesh begin
+  CALI_MARK_BEGIN("getting the mesh");
 
   // get the client handle 
   auto mesh = flecsi_get_client_handle(mesh_t, meshes, mesh0);
  
   // cout << mesh;
   
+  // [Caliper] getting the mesh end
+  CALI_MARK_END("getting the mesh");
+  
   //===========================================================================
   // Some typedefs
   //===========================================================================
+  
+  // [Caliper] typedefs begin
+  CALI_MARK_BEGIN("typedefs");
 
   using size_t = typename mesh_t::size_t;
   using real_t = typename mesh_t::real_t;
@@ -151,11 +177,17 @@ int driver(int argc, char** argv)
   // get machine zero
   constexpr auto epsilon = std::numeric_limits<real_t>::epsilon();
   const auto machine_zero = std::sqrt(epsilon);
+  
+  // [Caliper] typedefs end
+  CALI_MARK_END("typedefs");
 
   //===========================================================================
   // Access what we need
   //===========================================================================
   
+  // [Caliper] getting parameter handles begin
+  CALI_MARK_BEGIN("getting parameter handles");
+
   auto d  = flecsi_get_handle(mesh, hydro,  density,   real_t, dense, 0);
   //auto d0 = flecsi_get_handle(mesh, hydro,  density,   real_t, dense, 1);
   auto v  = flecsi_get_handle(mesh, hydro, velocity, vector_t, dense, 0);
@@ -168,11 +200,17 @@ int driver(int argc, char** argv)
   auto a  = flecsi_get_handle(mesh, hydro,     sound_speed, real_t, dense, 0);
 
   auto F = flecsi_get_handle(mesh, hydro, flux, flux_data_t, dense, 0);
+  
+  // [Caliper] getting parameter handles end
+  CALI_MARK_END("getting parameter handles");
 
   //===========================================================================
   // Initial conditions
   //===========================================================================
- 
+  
+  // [Caliper] initial conditions begin
+  CALI_MARK_BEGIN("initial conditions");
+
   // the solution time starts at zero
   real_t soln_time{0};  
   size_t time_cnt{0}; 
@@ -194,10 +232,16 @@ int driver(int argc, char** argv)
     auto insitu = io::catalyst::adaptor_t(catalyst_scripts);
     std::cout << "Catalyst on!" << std::endl;
   #endif
+  
+  // [Caliper] initial conditions end
+  CALI_MARK_END("initial conditions");
 
   //===========================================================================
   // Pre-processing
   //===========================================================================
+  
+  // [Caliper] pre-processing begin
+  CALI_MARK_BEGIN("pre-processing");
 
   // now output the solution
   auto has_output = (inputs_t::output_freq > 0);
@@ -216,47 +260,78 @@ int driver(int argc, char** argv)
 
   // start a clock
   auto tstart = utils::get_wall_time();
+  
+  // [Caliper] pre-processing end
+  CALI_MARK_END("pre-processing");
 
   //===========================================================================
   // Residual Evaluation
   //===========================================================================
+  
+  // [Caliper] residual eval begin
+  CALI_MARK_BEGIN("residual eval");
 
   auto & min_reduction = 
     flecsi::execution::context_t::instance().min_reduction();
+  
+  // [Caliper] marking the loop begin
+  CALI_CXX_MARK_LOOP_BEGIN(mainLoop, "main loop");
 
   for ( 
     size_t num_steps = 0;
     (num_steps < inputs_t::max_steps && soln_time < inputs_t::final_time); 
     ++num_steps 
   ) {   
+ 
+    // [Caliper] marking each loop iteration
+    CALI_CXX_MARK_LOOP_ITERATION(mainLoop, num_steps);
 
     //-------------------------------------------------------------------------
     // compute the time step
+
+    // [Caliper] evaluate_time_step begin
+    CALI_MARK_BEGIN("evaluate_time_step");
 
     auto local_future = flecsi_execute_task( 
       evaluate_time_step, single, mesh, d, v, e, p, T, a,
       inputs_t::CFL, inputs_t::final_time - soln_time
     );
 
+    // [Caliper] evaluate_time_step end
+    CALI_MARK_END("evaluate_time_step");
+
     // FleCSI does not yet support Future handling
     // auto global_future =
     //	flecsi::execution::context_t::instance().reduce_min(local_future);
     //flecsi::execution::flecsi_future__<mesh_t::real_t> *flecsi_future_time_step =
     //    &global_future;
-    mesh_t::real_t hacked_time_step = 1.0e-3;
+    mesh_t::real_t hacked_time_step = 1.0e-4;
 
     //-------------------------------------------------------------------------
     // try a timestep
+
+    // [Caliper] evaluate_fluxes begin
+    CALI_MARK_BEGIN("evaluate_fluxes");
 
     // compute the fluxes
     f = 
       flecsi_execute_task( evaluate_fluxes, single, mesh, d, v, e, p, T, a, F );
  
+    // [Caliper] evaluate_fluxes end
+    CALI_MARK_END("evaluate_fluxes");
+
+    // [Caliper] apply_update begin
+    CALI_MARK_BEGIN("apply_update");
+
     // Loop over each cell, scattering the fluxes to the cell
     f = flecsi_execute_task( 
       //apply_update, single, mesh, inputs_t::eos, flecsi_future_time_step, F, d, v, e, p, T, a
       apply_update, single, mesh, inputs_t::eos, hacked_time_step, F, d, v, e, p, T, a
     );
+
+    // [Caliper] apply_update end
+    CALI_MARK_END("apply_update");
+    
     // Be triply-sure that timing doesn't start until everyone is timestepping
     if (num_steps == 0) {
       f.wait();
@@ -315,9 +390,13 @@ int driver(int argc, char** argv)
       auto name_char = utils::to_trivial_string( name );
       auto f = flecsi_execute_task(output, single, mesh, name_char, d, v, e, p, T, a);
     }
-
-
   }
+  
+  // [Caliper] marking the loop end
+  CALI_CXX_MARK_LOOP_END(mainLoop);
+
+  // [Caliper] residual eval end
+  CALI_MARK_END("residual eval");
 
   //===========================================================================
   // Post-process
@@ -345,3 +424,4 @@ int driver(int argc, char** argv)
 
 } // namespace
 } // namespace
+
